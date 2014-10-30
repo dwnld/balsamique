@@ -109,23 +109,28 @@ EOF
   # updates jobstat_h to point to working_l with timestamp_f, and
   # returns the job information from args_h and tasks_h.
   DEQUEUE_TASK = <<EOF
-redis.call('hset', KEYS[6], KEYS[2], KEYS[1] .. ',' .. ARGV[1])
-local elem = redis.call('zrange', KEYS[1], 0, 0, 'withscores')
-if elem[2] and tonumber(elem[2]) <= tonumber(ARGV[1]) then
-  redis.call('zrem', KEYS[1], elem[1])
-  redis.call('lpush', KEYS[2], elem[1])
-  redis.call('hset', KEYS[3], elem[1],
-    KEYS[2] .. ',' .. KEYS[1] .. ',' .. ARGV[1])
-  return({ elem[1],
-    redis.call('hget', KEYS[4], elem[1]),
-    redis.call('hget', KEYS[5], elem[1]) })
+local ts = tonumber(ARGV[1])
+redis.call('hset', KEYS[5], KEYS[1], ts)
+local qi = 6
+while KEYS[qi] do
+  local elem = redis.call('zrange', KEYS[qi], 0, 0, 'withscores')
+  if elem[2] and tonumber(elem[2]) <= ts then
+    redis.call('zrem', KEYS[qi], elem[1])
+    redis.call('lpush', KEYS[1], elem[1])
+    redis.call('hset', KEYS[2], elem[1],
+      KEYS[1] .. ',' .. KEYS[qi] .. ',' .. ts)
+    return({ elem[1],
+      redis.call('hget', KEYS[3], elem[1]),
+      redis.call('hget', KEYS[4], elem[1]) })
+  end
+  qi = qi + 1
 end
 EOF
   DEQUEUE_TASK_SHA = Digest::SHA1.hexdigest(DEQUEUE_TASK)
-  def dequeue(task, worker, timestamp = Time.now.to_f)
-    queue_key = @que_prefix + task.to_s
+  def dequeue(tasks, worker, timestamp = Time.now.to_f)
     working_key = @working_prefix + worker.to_s
-    keys = [queue_key, working_key, @jobstatus, @args, @tasks, @workers]
+    keys = [working_key, @jobstatus, @args, @tasks, @workers]
+    tasks.each { |task| keys << @que_prefix + task.to_s }
     result = redis.eval(DEQUEUE_TASK, keys, [timestamp])
     if result
       id, args, tasks = result

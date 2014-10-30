@@ -33,7 +33,7 @@ describe Balsamique do
       expect(job_status.keys).to eq([id])
       expect(job_status[id]).to include({ state: :enqueued, task: task.first })
 
-      job = @bq.dequeue(task.first, worker)
+      job = @bq.dequeue(queues.shuffle, worker)
       expect(job).to eq({id: id, args: args, tasks: mtasks})
       job_status = @bq.job_status(id)
       expect(job_status.keys).to eq([id])
@@ -50,7 +50,7 @@ describe Balsamique do
   it 'allows a worker to record a task failure' do
     queued, id = @bq.enqueue(tasks, args)
     task = tasks.first.first
-    job = @bq.dequeue(task, worker)
+    job = @bq.dequeue([task], worker)
     fail_reason = { 'message' => 'Test Fail' }
     expect(@bq.fail(id, worker, fail_reason)).to eq(true)
     expect(@bq.queue_length(task)).to eq(0)
@@ -62,7 +62,7 @@ describe Balsamique do
   it 'records a lost state failure when a worker drops a task' do
     queued, id = @bq.enqueue(tasks, args)
     task = tasks.first.first
-    job = @bq.dequeue(task, worker)
+    job = @bq.dequeue([task], worker)
     expect(@bq.succeed(0, worker, [['foo', 'bar']])).to eq(false)
     expect(@bq.job_status(id)[id]).to include(
       { state: :failed, task: task, worker: worker,
@@ -72,7 +72,7 @@ describe Balsamique do
   it 'records a lost state failure when worker drops a task, fails another' do
     queued, id = @bq.enqueue(tasks, args)
     task = tasks.first.first
-    job = @bq.dequeue(task, worker)
+    job = @bq.dequeue([task], worker)
     expect(@bq.fail(0, worker, {})).to eq(false)
     expect(@bq.job_status(id)[id]).to include(
       { state: :failed, task: task, worker: worker,
@@ -90,7 +90,7 @@ describe Balsamique do
   it 'retires unique keys when jobs complete successfully' do
     queued, id = @bq.enqueue(tasks.take(1), args, 'bar')
     task = tasks.first.first
-    job = @bq.dequeue(task, worker)
+    job = @bq.dequeue([task], worker)
     @bq.succeed(id, worker, [[task, true]])
     queue2, id2 = @bq.enqueue(tasks.take(1), args, 'bar')
     expect(queue2).to eq(true)
