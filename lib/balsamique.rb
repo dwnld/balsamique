@@ -1,4 +1,5 @@
 require 'securerandom'
+require 'digest/sha1'
 require 'json'
 require 'redis'
 
@@ -20,6 +21,15 @@ class Balsamique
 
   def redis
     @redis
+  end
+
+  def redis_eval(cmd_sha, cmd, keys, argv)
+    begin
+      redis.evalsha(cmd_sha, keys, argv)
+    rescue Redis::CommandError
+      puts "[INFO] Falling back to EVAL for #{cmd_sha}"
+      redis.eval(cmd, keys, argv)
+    end
   end
 
   def self.next_task(tasks)
@@ -75,6 +85,7 @@ redis.call('zadd', KEYS[4], tonumber(ARGV[3]), id)
 redis.call('hset', KEYS[5], KEYS[4], id .. ',' .. ARGV[3])
 return id
 EOF
+  ENQUEUE_JOB_SHA = Digest::SHA1.hexdigest(ENQUEUE_JOB)
   def enqueue(tasks, args, uniq_in_flight = nil, run_at = Time.now.to_f)
     #    validate_tasks!(tasks)
     #    validate_args!(args)
@@ -84,7 +95,7 @@ EOF
     keys = [@tasks, @args, @jobstatus, queue_key, @queues, @unique]
     argv = [tasks.to_json, args.to_json, run_at]
     argv << uniq_in_flight if uniq_in_flight
-    result_id = redis.eval(ENQUEUE_JOB, keys, argv)
+    result_id = redis_eval(ENQUEUE_JOB_SHA, ENQUEUE_JOB, keys, argv)
     return result_id > 0, result_id.abs.to_s
   end
 
@@ -110,6 +121,7 @@ if elem[2] and tonumber(elem[2]) <= tonumber(ARGV[1]) then
     redis.call('hget', KEYS[5], elem[1]) })
 end
 EOF
+  DEQUEUE_TASK_SHA = Digest::SHA1.hexdigest(DEQUEUE_TASK)
   def dequeue(task, worker, timestamp = Time.now.to_f)
     queue_key = @que_prefix + task.to_s
     working_key = @working_prefix + worker.to_s
@@ -155,6 +167,7 @@ if id then
 end
 return id
 EOF
+  SUCCEED_TASK_SHA = Digest::SHA1.hexdigest(SUCCEED_TASK)
   def succeed(id, worker, tasks, timestamp = Time.now.to_f)
     next_task = self.class.next_task(tasks)
     working = @working_prefix + worker.to_s
@@ -166,7 +179,7 @@ EOF
     else
       keys << @args << @unique
     end
-    id == redis.eval(SUCCEED_TASK, keys, argv)
+    id == redis_eval(SUCCEED_TASK_SHA, SUCCEED_TASK, keys, argv)
   end
 
   FAIL_TASK = <<EOF
@@ -187,11 +200,12 @@ while id do
   id = redis.call('rpop', KEYS[1])
 end
 EOF
+  FAIL_TASK_SHA = Digest::SHA1.hexdigest(FAIL_TASK)
   def fail(id, worker, reason, timestamp = Time.now.to_f)
     working = @working_prefix + worker.to_s
     keys = [working, @jobstatus, @failz, @tasks]
     argv = [id, timestamp, JSON.generate(reason)]
-    id == redis.eval(FAIL_TASK, keys, argv)
+    id == redis_eval(FAIL_TASK_SHA, FAIL_TASK, keys, argv)
   end
 
   def queues
