@@ -14,6 +14,7 @@ class Balsamique
     @failz = namespace + ':failz'
     @workers = namespace + ':workers'
     @queues = namespace + ':queues'
+    @queuestats = namespace + ':queuestats'
     @unique = namespace + ':unique'
     @tasks = namespace + ':tasks'
     @args = namespace + ':args'
@@ -27,7 +28,7 @@ class Balsamique
     begin
       redis.evalsha(cmd_sha, keys, argv)
     rescue Redis::CommandError
-      puts "[INFO] Falling back to EVAL for #{cmd_sha}"
+      puts "[INFO] Balsamique falling back to EVAL for #{cmd_sha}"
       redis.eval(cmd, keys, argv)
     end
   end
@@ -86,6 +87,7 @@ redis.call('hset', KEYS[5], KEYS[4], id .. ',' .. ARGV[3])
 return id
 EOF
   ENQUEUE_JOB_SHA = Digest::SHA1.hexdigest(ENQUEUE_JOB)
+
   def enqueue(tasks, args, uniq_in_flight = nil, run_at = Time.now.to_f)
     #    validate_tasks!(tasks)
     #    validate_args!(args)
@@ -100,18 +102,18 @@ EOF
   end
 
   # Lua script DEQUEUE_TASK takes keys
-  # [task_z, working_l, args_h, jobstat_h, tasks_h, workers_h]
-  # and args [timestamp_f].
-  # It performs a conditional ZPOP on task_z, where the condition
-  # is that the score of the first item is <= timestamp_f.
-  # If nothing is available to ZPOP, the script is done.
-  # Otherwise, it lpushes the popped id onto working_l,
-  # updates jobstat_h to point to working_l with timestamp_f, and
-  # returns the job information from args_h and tasks_h.
+  # [working_l, args_h, jobstat_h, tasks_h, workers_h, queustats_h,
+  #   task1_z, ...], and args [timestamp_f].
+  # It performs a conditional ZPOP on task1_z, where the condition is
+  # that the score of the first item is <= timestamp_f.  If nothing is
+  # available to ZPOP, it tries task2_z, etc.  If an id is returned
+  # from any ZPOP, it lpushes the popped id onto working_l, updates
+  # jobstat_h to point to working_l with timestamp_f, and returns the
+  # job information from args_h and tasks_h.
   DEQUEUE_TASK = <<EOF
 local ts = tonumber(ARGV[1])
 redis.call('hset', KEYS[5], KEYS[1], ts)
-local qi = 6
+local qi = 7
 while KEYS[qi] do
   local elem = redis.call('zrange', KEYS[qi], 0, 0, 'withscores')
   if elem[2] and tonumber(elem[2]) <= ts then
@@ -119,6 +121,8 @@ while KEYS[qi] do
     redis.call('lpush', KEYS[1], elem[1])
     redis.call('hset', KEYS[2], elem[1],
       KEYS[1] .. ',' .. KEYS[qi] .. ',' .. ts)
+    redis.call('hset', KEYS[6], KEYS[qi] .. ',' .. math.ceil(ts * 0.1) % 360,
+      ts .. ',' .. (1 + redis.call('zcard', KEYS[qi])))
     return({ elem[1],
       redis.call('hget', KEYS[3], elem[1]),
       redis.call('hget', KEYS[4], elem[1]) })
@@ -127,9 +131,10 @@ while KEYS[qi] do
 end
 EOF
   DEQUEUE_TASK_SHA = Digest::SHA1.hexdigest(DEQUEUE_TASK)
+
   def dequeue(tasks, worker, timestamp = Time.now.to_f)
     working_key = @working_prefix + worker.to_s
-    keys = [working_key, @jobstatus, @args, @tasks, @workers]
+    keys = [working_key, @jobstatus, @args, @tasks, @workers, @queuestats]
     tasks.each { |task| keys << @que_prefix + task.to_s }
     result = redis.eval(DEQUEUE_TASK, keys, [timestamp])
     if result
@@ -173,6 +178,7 @@ end
 return id
 EOF
   SUCCEED_TASK_SHA = Digest::SHA1.hexdigest(SUCCEED_TASK)
+
   def succeed(id, worker, tasks, timestamp = Time.now.to_f)
     next_task = self.class.next_task(tasks)
     working = @working_prefix + worker.to_s
@@ -206,11 +212,25 @@ while id do
 end
 EOF
   FAIL_TASK_SHA = Digest::SHA1.hexdigest(FAIL_TASK)
+
   def fail(id, worker, reason, timestamp = Time.now.to_f)
     working = @working_prefix + worker.to_s
     keys = [working, @jobstatus, @failz, @tasks]
     argv = [id, timestamp, JSON.generate(reason)]
     id == redis_eval(FAIL_TASK_SHA, FAIL_TASK, keys, argv)
+  end
+
+  def retire_worker(worker)
+    succeed("", worker, [[]])
+    1 == redis.hdel(@workers, @working_prefix + worker.to_s)
+  end
+
+  def delete_queue(queue)
+    queue_key = @que_prefix + queue.to_s
+    redis.multi do |r|
+      r.del(queue_key)
+      r.hdel(@queues, queue_key)
+    end.last == 1
   end
 
   def queues

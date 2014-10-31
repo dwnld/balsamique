@@ -79,6 +79,27 @@ describe Balsamique do
         reason: { 'message' => 'Lost State' } })
   end
 
+  it 'allows a worker to retire, recording any lost state failures' do
+    queued, id = @bq.enqueue(tasks, args)
+    task = tasks.first.first
+    job = @bq.dequeue(tasks.map { |t| t.first }, worker)
+    expect(@bq.workers).to eq([worker])
+    expect(@bq.retire_worker(worker)).to eq(true)
+    expect(@bq.workers).to eq([])
+    expect(@bq.job_status(id)[id]).to include(
+      { state: :failed, task: task, worker: worker,
+        reason: { 'message' => 'Lost State' } })
+  end
+
+  it 'allows a queue to be deleted' do
+    queued, id = @bq.enqueue(tasks, args)
+    queue = tasks.first.first
+    expect(@bq.queues).to eq([queue])
+    expect(@bq.delete_queue(queue)).to eq(true)
+    expect(@bq.queues).to eq([])
+    expect(@bq.queue_length(queue)).to eq(0)
+  end
+
   it 'blocks attempts to enqueue jobs with duplicate unique keys' do
     queued, id = @bq.enqueue(tasks, args, 'foo')
     expect(queued).to eq(true)
