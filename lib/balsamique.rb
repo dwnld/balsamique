@@ -220,8 +220,48 @@ EOF
     id == redis_eval(FAIL_TASK_SHA, FAIL_TASK, keys, argv)
   end
 
+  def retry(id, task, run_at = Time.now.to_f)
+    queue = @que_prefix + task.to_s
+    redis.multi do |r|
+      r.zrem(@failz, id)
+      r.hset(@jobstatus, id, "#{queue},#{run_at}")
+      r.zadd(queue, run_at, id)
+    end
+  end
+
+  def get_failures(earliest = 0, latest = Time.now.to_f, limit = -100)
+    if limit < 0
+      redis.zrevrangebyscore(@failz, latest, earliest, limit: [0, -limit])
+    else
+      redis.zrangebyscore(@failz, earliest, latest, limit: [0, limit])
+    end
+  end
+
+  CLEAR_FAILED_JOBS = <<EOF
+local i = 1
+while ARGV[i] do
+  local id = ARGV[i]
+  redis.call('zrem', KEYS[1], id)
+  redis.call('hdel', KEYS[2], id)
+  redis.call('hdel', KEYS[3], id)
+  redis.call('hdel', KEYS[4], id)
+  local ukey = redis.call('hget', KEYS[5], id)
+  if ukey then
+    redis.call('hdel', KEYS[5], ukey)
+    redis.call('hdel', KEYS[5], id)
+  end
+i = i + 1
+end
+EOF
+  CLEAR_FAILED_JOBS_SHA = Digest::SHA1.hexdigest(CLEAR_FAILED_JOBS)
+
+  def clear_failed_jobs(*ids)
+    keys = [@failz, @tasks, @args, @jobstatus, @unique]
+    redis_eval(CLEAR_FAILED_JOBS_SHA, CLEAR_FAILED_JOBS, keys, ids)
+  end
+
   def retire_worker(worker)
-    succeed("", worker, [[]])
+    succeed('', worker, [[]])
     1 == redis.hdel(@workers, @working_prefix + worker.to_s)
   end
 
@@ -251,6 +291,7 @@ EOF
     statuses = redis.hmget(@jobstatus, *ids)
     result = {}
     ids.zip(statuses).each do |(id, status)|
+      next unless status
       result[id] = self.class.match_prefix(status,
         { @que_prefix => Proc.new do |s|
             task, run_at = s.split(',')

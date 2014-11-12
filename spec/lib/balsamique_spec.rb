@@ -57,6 +57,7 @@ describe Balsamique do
     job_status = @bq.job_status(id)
     expect(job_status[id]).to include(
       { state: :failed, task: task, worker: worker, reason: fail_reason })
+    expect(@bq.get_failures).to eq([id])
   end
 
   it 'records a lost state failure when a worker drops a task' do
@@ -67,6 +68,7 @@ describe Balsamique do
     expect(@bq.job_status(id)[id]).to include(
       { state: :failed, task: task, worker: worker,
         reason: { 'message' => 'Lost State' } })
+    expect(@bq.get_failures).to eq([id])
   end
 
   it 'records a lost state failure when worker drops a task, fails another' do
@@ -117,4 +119,33 @@ describe Balsamique do
     expect(queue2).to eq(true)
     expect(id2).not_to eq(id)
   end
+
+  it 'allows a failed task to be retried' do
+    queued, id = @bq.enqueue(tasks, args)
+    task = tasks.first.first
+    job0 = @bq.dequeue([task], worker)
+    @bq.fail(id, worker, { 'message' => 'Test Fail' })
+    @bq.retry(id, task)
+    expect(@bq.queue_length(task)).to eq(1)
+    job1 = @bq.dequeue([task], worker)
+    expect(job1).to eq(job0)
+    expect(@bq.job_status(id)[id]).to include(
+      { state: :working, task: task, worker: worker })
+    expect(@bq.get_failures).to eq([])
+  end
+
+  it 'allows a failed task to be cleared' do
+    queued, id = @bq.enqueue(tasks, args, 'bar')
+    task = tasks.first.first
+    job = @bq.dequeue([task], worker)
+    @bq.fail(id, worker, { 'message' => 'Test Fail' })
+    expect(@bq.get_failures).to eq([id])
+    @bq.clear_failed_jobs(id)
+    expect(@bq.get_failures).to eq([])
+    expect(@bq.job_status(id)).to eq({})
+    queue2, id2 = @bq.enqueue(tasks, args, 'bar')
+    expect(queue2).to eq(true)
+    expect(id2).not_to eq(id)
+  end
+
 end
