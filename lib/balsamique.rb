@@ -9,12 +9,12 @@ class Balsamique
 
     @que_prefix = namespace + ':que:'
     @working_prefix = namespace + ':working:'
+    @questats_prefix = namespace + ':questats:'
 
     @jobstatus = namespace + ':jobstatus'
     @failz = namespace + ':failz'
     @workers = namespace + ':workers'
     @queues = namespace + ':queues'
-    @queuestats = namespace + ':queuestats'
     @unique = namespace + ':unique'
     @tasks = namespace + ':tasks'
     @args = namespace + ':args'
@@ -51,6 +51,28 @@ class Balsamique
       return proc.call(stripped) if stripped
     end
     return nil
+  end
+
+  STATS_SLICE = 10 # seconds
+  STATS_CHUNK = 90 # slices (= 900 seconds = 15 minutes)
+  def self.slice_timestamp(ts)
+    slice = ts.to_i / STATS_SLICE
+    return slice / STATS_CHUNK, slice % STATS_CHUNK
+  end
+  def self.enc36(i)
+    i.to_s(36)
+  end
+  def self.dec36(s)
+    s.to_i(36)
+  end
+  def self.enc36_slice_timestamp(ts)
+    self.slice_timestamp(ts).map { |i| self.enc36(i) }
+  end
+  def self.assemble_timestamp(chunk, slice)
+    (chunk * STATS_CHUNK + slice) * STATS_SLICE
+  end
+  def self.dec36_assemble_timestamp(echunk, eslice)
+    self.assemble_timestamp(self.dec36(echunk), self.dec36(eslice))
   end
 
   # Lua script ENQUEUE_JOB takes keys
@@ -93,7 +115,7 @@ EOF
     #    validate_args!(args)
     next_task = self.class.next_task(tasks)
     return false, false unless next_task
-    queue_key = @que_prefix + next_task
+    queue_key = @que_prefix + next_task.to_s
     keys = [@tasks, @args, @jobstatus, queue_key, @queues, @unique]
     argv = [tasks.to_json, args.to_json, run_at]
     argv << uniq_in_flight if uniq_in_flight
@@ -102,17 +124,18 @@ EOF
   end
 
   # Lua script DEQUEUE_TASK takes keys
-  # [working_l, args_h, jobstat_h, tasks_h, workers_h, queustats_h,
-  #   task1_z, ...], and args [timestamp_f].
+  # [working_l, args_h, jobstat_h, tasks_h, workers_h, questats_h,
+  #   task1_z, ...], and args [timestamp_f, tmod].
   # It performs a conditional ZPOP on task1_z, where the condition is
   # that the score of the first item is <= timestamp_f.  If nothing is
   # available to ZPOP, it tries task2_z, etc.  If an id is returned
   # from any ZPOP, it lpushes the popped id onto working_l, updates
-  # jobstat_h to point to working_l with timestamp_f, and returns the
-  # job information from args_h and tasks_h.
+  # jobstat_h to point to working_l with timestamp_f, writes stats
+  # info to questats_h, and returns the job information from args_h
+  # and tasks_h.
   DEQUEUE_TASK = <<EOF
 local ts = tonumber(ARGV[1])
-redis.call('hset', KEYS[5], KEYS[1], ts)
+ redis.call('hset', KEYS[5], KEYS[1], ts)
 local qi = 7
 while KEYS[qi] do
   local elem = redis.call('zrange', KEYS[qi], 0, 0, 'withscores')
@@ -121,8 +144,10 @@ while KEYS[qi] do
     redis.call('lpush', KEYS[1], elem[1])
     redis.call('hset', KEYS[2], elem[1],
       KEYS[1] .. ',' .. KEYS[qi] .. ',' .. ts)
-    redis.call('hset', KEYS[6], KEYS[qi] .. ',' .. math.ceil(ts * 0.1) % 360,
-      ts .. ',' .. (1 + redis.call('zcard', KEYS[qi])))
+    redis.call('hset', KEYS[6], KEYS[qi] .. ',len,' .. ARGV[2],
+      redis.call('zcard', KEYS[qi]))
+    redis.call('hincrby', KEYS[6], KEYS[qi] .. ',dq,' .. ARGV[2], 1)
+    redis.call('expire', KEYS[6], 21600)
     return({ elem[1],
       redis.call('hget', KEYS[3], elem[1]),
       redis.call('hget', KEYS[4], elem[1]) })
@@ -134,9 +159,11 @@ EOF
 
   def dequeue(tasks, worker, timestamp = Time.now.to_f)
     working_key = @working_prefix + worker.to_s
-    keys = [working_key, @jobstatus, @args, @tasks, @workers, @queuestats]
+    stats_chunk, stats_slice = self.class.enc36_slice_timestamp(timestamp)
+    questats_key = @questats_prefix + stats_chunk
+    keys = [working_key, @jobstatus, @args, @tasks, @workers, questats_key]
     tasks.each { |task| keys << @que_prefix + task.to_s }
-    result = redis.eval(DEQUEUE_TASK, keys, [timestamp])
+    result = redis.eval(DEQUEUE_TASK, keys, [timestamp, stats_slice])
     if result
       id, args, tasks = result
       { id: id, args: JSON.parse(args), tasks: JSON.parse(tasks) }
@@ -312,5 +339,25 @@ EOF
         })
     end
     result
+  end
+
+  def queue_stats(chunks = 3, latest = Time.now.to_f)
+    last_chunk, last_slice = self.class.slice_timestamp(latest)
+    stats = {}
+    (0..(chunks - 1)).each do |chunk_i|
+      chunk_ts = self.class.enc36(last_chunk - chunk_i)
+      questats_key = @questats_prefix + chunk_ts
+      stats_chunk = redis.hgetall(questats_key)
+      next unless stats_chunk
+      stats_chunk.each do |key, val|
+        queue, stat, slice = key.split(',')
+        queue = self.class.strip_prefix(queue, @que_prefix)
+        timestamp = self.class.dec36_assemble_timestamp(chunk_ts, slice)
+        stats[stat] = {} unless stats[stat]
+        stats[stat][timestamp] = {} unless stats[stat][timestamp]
+        stats[stat][timestamp][queue] = val.to_i
+      end
+    end
+    stats
   end
 end

@@ -148,4 +148,26 @@ describe Balsamique do
     expect(id2).not_to eq(id)
   end
 
+  it 'counts task dequeue events in queue_stats' do
+    @bq.enqueue(tasks, args)
+    @bq.enqueue(tasks, args)
+    t0 = Time.now.to_f
+    queues = tasks.map{ |task| task.first }
+    mtasks = tasks
+    job0 = @bq.dequeue(queues, worker, t0)
+    job1 = @bq.dequeue(queues, worker, t0)
+    mtasks[0] << true
+    @bq.succeed(job0[:id], worker, mtasks)
+    @bq.succeed(job1[:id], worker, mtasks)
+    job0 = @bq.dequeue(queues, worker, t0 + Balsamique::STATS_SLICE)
+
+    slice0 = t0.to_i
+    slice0 -= slice0 % Balsamique::STATS_SLICE
+    slice1 = slice0 + Balsamique::STATS_SLICE
+
+    expect(@bq.queue_stats(3, t0 + 2 * Balsamique::STATS_SLICE))
+      .to eq({
+        "len" => {slice0 => {queues[0] => 0}, slice1 => {queues[1] => 1}},
+        "dq"  => {slice0 => {queues[0] => 2}, slice1 => {queues[1] => 1}}})
+  end
 end
