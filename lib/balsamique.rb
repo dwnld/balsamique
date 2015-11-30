@@ -18,6 +18,7 @@ class Balsamique
     @unique = namespace + ':unique'
     @tasks = namespace + ':tasks'
     @args = namespace + ':args'
+    @report_queue = namespace + ':reports'
   end
 
   def redis
@@ -163,7 +164,7 @@ EOF
     questats_key = @questats_prefix + stats_chunk
     keys = [working_key, @jobstatus, @args, @tasks, @workers, questats_key]
     tasks.each { |task| keys << @que_prefix + task.to_s }
-    result = redis.eval(DEQUEUE_TASK, keys, [timestamp, stats_slice])
+    result = redis_eval(DEQUEUE_TASK_SHA, DEQUEUE_TASK, keys, [timestamp, stats_slice])
     if result
       id, args, tasks = result
       { id: id, args: JSON.parse(args), tasks: JSON.parse(tasks) }
@@ -359,5 +360,30 @@ EOF
       end
     end
     stats
+  end
+
+  COND_ZADD = <<EOF
+if (not redis.call('zscore', KEYS[1], ARGV[1])) then
+  redis.call('zadd', KEYS[1], ARGV[2], ARGV[1])
+end
+EOF
+  COND_ZADD_SHA = Digest::SHA1.hexdigest(COND_ZADD)
+
+  def push_report(id, timestamp = Time.now.to_f, key = @report_queue)
+    redis_eval(COND_ZADD_SHA, COND_ZADD, [key], [id, timestamp])
+  end
+
+  COND_ZPOP = <<EOF
+local elem = redis.call('zrange', KEYS[1], 0, 0, 'withscores')
+if (elem[2] and (tonumber(elem[2]) < tonumber(ARGV[1]))) then
+  redis.call('zrem', KEYS[1], elem[1])
+  return elem
+end
+EOF
+  COND_ZPOP_SHA = Digest::SHA1.hexdigest(COND_ZPOP)
+
+  def pop_report(timestamp = Time.now.to_f, key = @report_queue)
+    result = redis_eval(COND_ZPOP_SHA, COND_ZPOP, [key], [timestamp])
+    return result[0], result[1].to_f if result
   end
 end

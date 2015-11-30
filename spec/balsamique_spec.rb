@@ -170,4 +170,13 @@ describe Balsamique do
         "len" => {slice0 => {queues[0] => 0}, slice1 => {queues[1] => 1}},
         "dq"  => {slice0 => {queues[0] => 2}, slice1 => {queues[1] => 1}}})
   end
+
+  it 'allows pushing, popping report queue messages' do
+    timestamp = Time.now.to_f
+    id = random_name
+    @bq.push_report(id, timestamp)
+    expect(@bq.pop_report(timestamp - 0.001)).to be nil
+    expect(@bq.pop_report(timestamp + 0.001)).to eq([id, timestamp])
+    expect(@bq.pop_report(timestamp + 0.002)).to be nil
+  end
 end
