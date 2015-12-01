@@ -19,7 +19,11 @@ class Balsamique
     @tasks = namespace + ':tasks'
     @args = namespace + ':args'
     @report_queue = namespace + ':reports'
+    @report_retries = namespace + ':reports_retry'
   end
+
+  REPORT_MAX_RETRIES = 5
+  REPORT_RETRY_DELAY = 60 # seconds
 
   def redis
     @redis
@@ -362,28 +366,40 @@ EOF
     stats
   end
 
-  COND_ZADD = <<EOF
-if (not redis.call('zscore', KEYS[1], ARGV[1])) then
-  redis.call('zadd', KEYS[1], ARGV[2], ARGV[1])
-end
-EOF
-  COND_ZADD_SHA = Digest::SHA1.hexdigest(COND_ZADD)
-
-  def push_report(id, timestamp = Time.now.to_f, key = @report_queue)
-    redis_eval(COND_ZADD_SHA, COND_ZADD, [key], [id, timestamp])
+  def push_report(id, timestamp = Time.now.to_f)
+    redis.multi do |r|
+      r.hdel(@report_retries, id)
+      r.zadd(@report_queue, timestamp, id)
+    end
   end
 
-  COND_ZPOP = <<EOF
+  REPORT_POP = <<EOF
+local t_pop = tonumber(ARGV[1])
 local elem = redis.call('zrange', KEYS[1], 0, 0, 'withscores')
-if (elem[2] and (tonumber(elem[2]) < tonumber(ARGV[1]))) then
-  redis.call('zrem', KEYS[1], elem[1])
+local t_elem = elem[2] and tonumber(elem[2])
+if (t_elem and t_elem < t_pop) then
+  local retries = redis.call('hincrby', KEYS[2], elem[1], 1)
+  if (retries <= tonumber(ARGV[2])) then
+    local t_retry = t_pop + tonumber(ARGV[3]) * 2 ^ retries
+    redis.call('zadd', KEYS[1], t_retry, elem[1])
+  else
+    redis.call('zrem', KEYS[1], elem[1])
+    redis.call('hdel', KEYS[2], elem[1])
+  end
   return elem
 end
 EOF
-  COND_ZPOP_SHA = Digest::SHA1.hexdigest(COND_ZPOP)
+ REPORT_POP_SHA = Digest::SHA1.hexdigest(REPORT_POP)
 
-  def pop_report(timestamp = Time.now.to_f, key = @report_queue)
-    result = redis_eval(COND_ZPOP_SHA, COND_ZPOP, [key], [timestamp])
-    return result[0], result[1].to_f if result
+  def pop_report(timestamp = Time.now.to_f)
+    result = redis_eval(
+      REPORT_POP_SHA, REPORT_POP, [@report_queue, @report_retries],
+      [timestamp, REPORT_MAX_RETRIES, REPORT_RETRY_DELAY])
+    return result.first, result.last.to_f if result
+  end
+
+  def complete_report(id)
+    retry_keys_deleted = redis.hdel(@report_retries, id)
+    redis.zrem(@report_queue, id) if retry_keys_deleted > 0
   end
 end
