@@ -22,7 +22,6 @@ class Balsamique
     @report_retries = namespace + ':reports_retry'
   end
 
-  REPORT_MAX_RETRIES = 5
   REPORT_RETRY_DELAY = 60 # seconds
 
   def redis
@@ -379,23 +378,20 @@ local elem = redis.call('zrange', KEYS[1], 0, 0, 'withscores')
 local t_elem = elem[2] and tonumber(elem[2])
 if (t_elem and t_elem < t_pop) then
   local retries = redis.call('hincrby', KEYS[2], elem[1], 1)
-  if (retries <= tonumber(ARGV[2])) then
-    local t_retry = t_pop + tonumber(ARGV[3]) * 2 ^ retries
-    redis.call('zadd', KEYS[1], t_retry, elem[1])
-  else
-    redis.call('zrem', KEYS[1], elem[1])
-    redis.call('hdel', KEYS[2], elem[1])
-  end
+  local t_retry = t_pop + tonumber(ARGV[2]) * 2 ^ retries
+  redis.call('zadd', KEYS[1], t_retry, elem[1])
+  elem[3] = retries
   return elem
 end
 EOF
- REPORT_POP_SHA = Digest::SHA1.hexdigest(REPORT_POP)
+  REPORT_POP_SHA = Digest::SHA1.hexdigest(REPORT_POP)
 
   def pop_report(timestamp = Time.now.to_f)
     result = redis_eval(
       REPORT_POP_SHA, REPORT_POP, [@report_queue, @report_retries],
-      [timestamp, REPORT_MAX_RETRIES, REPORT_RETRY_DELAY])
-    return result.first, result.last.to_f if result
+      [timestamp, REPORT_RETRY_DELAY])
+    result[1] = result[1].to_f if result
+    result
   end
 
   def complete_report(id)

@@ -177,12 +177,10 @@ describe Balsamique do
     id = random_name
     @bq.push_report(id, timestamp)
     expect(@bq.pop_report(timestamp - 0.001)).to be nil
-    expect(@bq.pop_report(pop_time)).to eq([id, timestamp])
+    expect(@bq.pop_report(pop_time)).to eq([id, timestamp, 1])
     expect(@bq.pop_report(timestamp + 0.002)).to be nil
     @bq.complete_report(id)
-    pop_time +=
-      Balsamique::REPORT_RETRY_DELAY *
-      2**(Balsamique::REPORT_MAX_RETRIES + 3)
+    pop_time += Balsamique::REPORT_RETRY_DELAY * 600
     expect(@bq.pop_report(pop_time)).to be nil
   end
 
@@ -191,14 +189,12 @@ describe Balsamique do
     pop_time = timestamp + 0.001
     id = random_name
     @bq.push_report(id, timestamp)
-    expect(@bq.pop_report(pop_time)).to eq([id, timestamp])
+    expect(@bq.pop_report(pop_time)).to eq([id, timestamp, 1])
     @bq.push_report(id, pop_time)
     @bq.complete_report(id)
-    expect(@bq.pop_report(pop_time + 0.001)).to eq([id, pop_time])
+    expect(@bq.pop_report(pop_time + 0.001)).to eq([id, pop_time, 1])
     @bq.complete_report(id)
-    pop_time +=
-      Balsamique::REPORT_RETRY_DELAY *
-      2**(Balsamique::REPORT_MAX_RETRIES + 3)
+    pop_time += Balsamique::REPORT_RETRY_DELAY * 600
     expect(@bq.pop_report(pop_time)).to be nil
   end
 
@@ -207,17 +203,17 @@ describe Balsamique do
     pop_time = timestamp + 0.001
     id = random_name
     @bq.push_report(id, timestamp)
-    expect(@bq.pop_report(pop_time)).to eq([id, timestamp])
-    (1..Balsamique::REPORT_MAX_RETRIES).each do |count|
+    expect(@bq.pop_report(pop_time)).to eq([id, timestamp, 1])
+    (1..6).each do |count|
       pop_time += 0.001 + Balsamique::REPORT_RETRY_DELAY * 2**count
       result = @bq.pop_report(pop_time)
-      expect(result.size).to eq(2)
-      expect(result.first).to eq(id)
-      expect((result.last - pop_time + 0.001).abs).to be < 0.0001
+      expect(result.size).to eq(3)
+      expect(result[0]).to eq(id)
+      expect((result[1] - pop_time + 0.001).abs).to be < 0.0001
+      expect(result[2]).to eq(count + 1)
     end
-    pop_time +=
-      Balsamique::REPORT_RETRY_DELAY *
-      2**(Balsamique::REPORT_MAX_RETRIES + 2)
+    @bq.complete_report(id)
+    pop_time += Balsamique::REPORT_RETRY_DELAY * 600
     expect(@bq.pop_report(pop_time)).to be nil
   end
 end
