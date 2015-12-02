@@ -394,8 +394,14 @@ EOF
     result
   end
 
+  REPORT_COMPLETE = <<EOF
+if (redis.call('hdel', KEYS[2], ARGV[1]) > 0) then
+  redis.call('zrem', KEYS[1], ARGV[1])
+end
+EOF
+  REPORT_COMPLETE_SHA = Digest::SHA1.hexdigest(REPORT_COMPLETE)
   def complete_report(id)
-    retry_keys_deleted = redis.hdel(@report_retries, id)
-    redis.zrem(@report_queue, id) if retry_keys_deleted > 0
+    redis_eval(REPORT_COMPLETE_SHA, REPORT_COMPLETE,
+      [@report_queue, @report_retries], [id])
   end
 end
