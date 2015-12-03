@@ -1,4 +1,3 @@
-require 'securerandom'
 require 'digest/sha1'
 require 'json'
 require 'redis'
@@ -8,37 +7,41 @@ class Balsamique
     @redis = redis
 
     @que_prefix = namespace + ':que:'
-    @working_prefix = namespace + ':working:'
     @questats_prefix = namespace + ':questats:'
+    @env_prefix = namespace + ':env:'
 
-    @jobstatus = namespace + ':jobstatus'
-    @failz = namespace + ':failz'
-    @workers = namespace + ':workers'
+    @status = namespace + ':status'
     @queues = namespace + ':queues'
+    @retries = namespace + ':retries'
+    @failures = namespace + ':failures'
+    @failz = namespace + ':failz'
     @unique = namespace + ':unique'
     @tasks = namespace + ':tasks'
     @args = namespace + ':args'
-    @report_queue = namespace + ':reports'
-    @report_retries = namespace + ':reports_retry'
+    @report_queue = @que_prefix + '_report'
   end
 
   REPORT_RETRY_DELAY = 60 # seconds
+  RETRY_DELAY = 600 # seconds
 
   def redis
     @redis
   end
 
   def redis_eval(cmd_sha, cmd, keys, argv)
-    begin
-      redis.evalsha(cmd_sha, keys, argv)
-    rescue Redis::CommandError
-      puts "[INFO] Balsamique falling back to EVAL for #{cmd_sha}"
-      redis.eval(cmd, keys, argv)
-    end
+    redis.evalsha(cmd_sha, keys, argv)
+  rescue Redis::CommandError
+    puts "[INFO] Balsamique falling back to EVAL for #{cmd_sha}"
+    redis.eval(cmd, keys, argv)
   end
 
   def self.next_task(tasks)
     item = tasks.find { |t| t.size == 1 }
+    item && item.first
+  end
+
+  def self.current_task(tasks)
+    item = tasks.reverse.find { |t| t.size > 1 }
     item && item.first
   end
 
@@ -47,14 +50,6 @@ class Balsamique
     if str[0,s] == prefix
       str[s, str.size - s]
     end
-  end
-
-  def self.match_prefix(str, matches)
-    matches.each do |prefix, proc|
-      stripped = self.strip_prefix(str, prefix)
-      return proc.call(stripped) if stripped
-    end
-    return nil
   end
 
   STATS_SLICE = 10 # seconds
@@ -115,12 +110,10 @@ EOF
   ENQUEUE_JOB_SHA = Digest::SHA1.hexdigest(ENQUEUE_JOB)
 
   def enqueue(tasks, args, uniq_in_flight = nil, run_at = Time.now.to_f)
-    #    validate_tasks!(tasks)
-    #    validate_args!(args)
     next_task = self.class.next_task(tasks)
-    return false, false unless next_task
+    return false, nil unless next_task
     queue_key = @que_prefix + next_task.to_s
-    keys = [@tasks, @args, @jobstatus, queue_key, @queues, @unique]
+    keys = [@tasks, @args, @status, queue_key, @queues, @unique]
     argv = [tasks.to_json, args.to_json, run_at]
     argv << uniq_in_flight if uniq_in_flight
     result_id = redis_eval(ENQUEUE_JOB_SHA, ENQUEUE_JOB, keys, argv)
@@ -128,172 +121,174 @@ EOF
   end
 
   # Lua script DEQUEUE_TASK takes keys
-  # [working_l, args_h, jobstat_h, tasks_h, workers_h, questats_h,
-  #   task1_z, ...], and args [timestamp_f, tmod].
-  # It performs a conditional ZPOP on task1_z, where the condition is
-  # that the score of the first item is <= timestamp_f.  If nothing is
-  # available to ZPOP, it tries task2_z, etc.  If an id is returned
-  # from any ZPOP, it lpushes the popped id onto working_l, updates
-  # jobstat_h to point to working_l with timestamp_f, writes stats
-  # info to questats_h, and returns the job information from args_h
-  # and tasks_h.
+  #   [args_h, tasks_h, questats_h, retries_h, task1_z, ...],
+  # and args [timestamp_f, retry_delay, tmod].
+  # It performs a conditional ZPOP on task1_z, where the
+  # condition is that the score of the first item is <= timestamp_f.
+  # If nothing is available to ZPOP, it tries task2_z, etc.  If an id
+  # is returned from any ZPOP, it increments the retry count in retries_h
+  # and reschedules the task accordingly.  Then it writes stats info to
+  # questats_h, and returns the job information from args_h and tasks_h.
+
   DEQUEUE_TASK = <<EOF
 local ts = tonumber(ARGV[1])
- redis.call('hset', KEYS[5], KEYS[1], ts)
-local qi = 7
-while KEYS[qi] do
-  local elem = redis.call('zrange', KEYS[qi], 0, 0, 'withscores')
+local i = 5
+while KEYS[i] do
+  local elem = redis.call('zrange', KEYS[i], 0, 0, 'withscores')
   if elem[2] and tonumber(elem[2]) <= ts then
-    redis.call('zrem', KEYS[qi], elem[1])
-    redis.call('lpush', KEYS[1], elem[1])
-    redis.call('hset', KEYS[2], elem[1],
-      KEYS[1] .. ',' .. KEYS[qi] .. ',' .. ts)
-    redis.call('hset', KEYS[6], KEYS[qi] .. ',len,' .. ARGV[2],
-      redis.call('zcard', KEYS[qi]))
-    redis.call('hincrby', KEYS[6], KEYS[qi] .. ',dq,' .. ARGV[2], 1)
-    redis.call('expire', KEYS[6], 21600)
+    local retries = redis.call('hincrby', KEYS[4], elem[1] .. ',' .. KEYS[i], 1)
+    local t_retry = ts + tonumber(ARGV[2]) * 2 ^ retries
+    redis.call('zadd', KEYS[i], t_retry, elem[1])
+    redis.call('hset', KEYS[3], KEYS[i] .. ',len,' .. ARGV[3],
+      redis.call('zcard', KEYS[i]))
+    redis.call('hincrby', KEYS[3], KEYS[i] .. ',dq,' .. ARGV[3], 1)
+    redis.call('expire', KEYS[3], 21600)
     return({ elem[1],
-      redis.call('hget', KEYS[3], elem[1]),
-      redis.call('hget', KEYS[4], elem[1]) })
+      redis.call('hget', KEYS[1], elem[1]),
+      redis.call('hget', KEYS[2], elem[1]), retries })
   end
-  qi = qi + 1
+  i = i + 1
 end
 EOF
   DEQUEUE_TASK_SHA = Digest::SHA1.hexdigest(DEQUEUE_TASK)
 
-  def dequeue(tasks, worker, timestamp = Time.now.to_f)
-    working_key = @working_prefix + worker.to_s
+  def dequeue(tasks, retry_delay = RETRY_DELAY, timestamp = Time.now.to_f)
     stats_chunk, stats_slice = self.class.enc36_slice_timestamp(timestamp)
     questats_key = @questats_prefix + stats_chunk
-    keys = [working_key, @jobstatus, @args, @tasks, @workers, questats_key]
+    keys = [@args, @tasks, questats_key, @retries]
     tasks.each { |task| keys << @que_prefix + task.to_s }
-    result = redis_eval(DEQUEUE_TASK_SHA, DEQUEUE_TASK, keys, [timestamp, stats_slice])
+    result = redis_eval(
+      DEQUEUE_TASK_SHA, DEQUEUE_TASK, keys,
+      [timestamp, retry_delay, stats_slice])
     if result
-      id, args, tasks = result
-      { id: id, args: JSON.parse(args), tasks: JSON.parse(tasks) }
+      id, args, tasks, retries = result
+      { id: id, args: JSON.parse(args), tasks: JSON.parse(tasks),
+        retries: retries }
     end
   end
 
   SUCCEED_TASK = <<EOF
+local id = ARGV[1]
 local ts = tonumber(ARGV[2])
-local id = redis.call('rpop', KEYS[1])
-while id and not(id == ARGV[1]) do
-  local tasks = cjson.decode(redis.call('hget', KEYS[4], id))
-  local cur_task = ''
-  for _, task in ipairs(tasks) do
-    if not task[2] then cur_task = task[1]; break end
-  end
-  redis.call('zadd', KEYS[3], ts, id)
-  redis.call('hset', KEYS[2], id,
-    KEYS[3] .. ',' .. cur_task .. ',' .. KEYS[1] .. ',' .. ts .. ',' ..
-     '{"message":"Lost State"}')
-  id = redis.call('rpop', KEYS[1])
+local tasks = cjson.decode(redis.call('hget', KEYS[1], id))
+local cur_task = ''
+for _, task in ipairs(tasks) do
+  if not task[2] then cur_task = task[1]; break end
 end
-if id then
-  if ARGV[3] then
-    redis.call('zadd', KEYS[5], ts, id)
-    redis.call('hset', KEYS[2], id, KEYS[5] .. ',' .. ts)
-    redis.call('hset', KEYS[4], id, ARGV[3])
-    redis.call('hset', KEYS[6], KEYS[5], id .. ',' .. ts)
-  else
-    redis.call('hdel', KEYS[2], id)
-    redis.call('hdel', KEYS[4], id)
-    redis.call('hdel', KEYS[5], id)
-    local ukey = redis.call('hget', KEYS[6], id)
-    if ukey then
-      redis.call('hdel', KEYS[6], ukey)
-      redis.call('hdel', KEYS[6], id)
-    end
+if (not (string.sub(KEYS[7], - string.len(cur_task)) == cur_task)) then
+  return redis.error_reply(
+    string.format('task mis-match %s %s %s', id, cur_task, KEYS[7]))
+end
+if (redis.call('hdel', KEYS[3], id .. ',' .. KEYS[7]) > 0) then
+  redis.call('zrem', KEYS[7], id)
+else
+  return redis.error_reply('missing retry count %s %s', id, KEYS[7])
+end
+local status = redis.call('hget', KEYS[2], id)
+local i = 0
+for r in string.gmatch(status, "[^,]+") do
+  i = i + 1
+  if (i > 2 and i % 2 == 1) then
+    local rkey = id .. ',' .. KEYS[7] .. ',' .. r
+    redis.call('zrem', KEYS[5], rkey)
+    redis.call('hdel', KEYS[6], rkey)
   end
+end
+redis.call('hset', KEYS[1], id, ARGV[3])
+redis.call('hdel', KEYS[3], id .. ',' .. KEYS[4])
+redis.call('zadd', KEYS[4], ts, id)
+if (KEYS[8]) then
+  redis.call('hset', KEYS[2], id, KEYS[8] .. ',' .. ts)
+  redis.call('hdel', KEYS[3], id .. ',' .. KEYS[8])
+  redis.call('zadd', KEYS[8], ts, id)
+  redis.call('hset', KEYS[9], KEYS[8], id .. ',' .. ts)
+else
+  redis.call('hset', KEYS[2], id, '_' .. ',' .. ts)
 end
 return id
 EOF
   SUCCEED_TASK_SHA = Digest::SHA1.hexdigest(SUCCEED_TASK)
 
-  def succeed(id, worker, tasks, timestamp = Time.now.to_f)
+  def succeed(id, tasks, timestamp = Time.now.to_f)
+    current_task = self.class.current_task(tasks)
     next_task = self.class.next_task(tasks)
-    working = @working_prefix + worker.to_s
-    keys = [working, @jobstatus, @failz, @tasks]
-    argv = [id, timestamp]
-    if next_task
-      argv << tasks.to_json
-      keys << (@que_prefix + next_task) << @queues
-    else
-      keys << @args << @unique
-    end
+    keys = [
+      @tasks, @status, @retries, @report_queue, @failz, @failures,
+      @que_prefix + current_task]
+    argv = [id, timestamp, tasks.to_json]
+    keys << (@que_prefix + next_task) << @queues if next_task
     id == redis_eval(SUCCEED_TASK_SHA, SUCCEED_TASK, keys, argv)
   end
 
   FAIL_TASK = <<EOF
+local id = ARGV[1]
 local ts = tonumber(ARGV[2])
-local id = redis.call('rpop', KEYS[1])
-while id do
-  local tasks = cjson.decode(redis.call('hget', KEYS[4], id))
-  local cur_task = ''
-  for _, task in ipairs(tasks) do
-    if not task[2] then cur_task = task[1]; break end
-  end
-  redis.call('zadd', KEYS[3], ts, id)
-  local reason = '{"message":"Lost State"}'
-  if ARGV[1] == id then reason = ARGV[3] end
-  redis.call('hset', KEYS[2], id,
-    KEYS[3] .. ',' .. cur_task .. ',' .. KEYS[1] .. ',' .. ts .. ',' .. reason)
-  if ARGV[1] == id then return id end
-  id = redis.call('rpop', KEYS[1])
+local tasks = cjson.decode(redis.call('hget', KEYS[1], id))
+local cur_task = ''
+for _, task in ipairs(tasks) do
+  if not task[2] then cur_task = task[1]; break end
 end
+if (not (string.sub(ARGV[3], - string.len(cur_task)) == cur_task)) then
+  return redis.error_reply(
+    string.format('task mismatch %s %s %s', id, cur_task, ARGV[3]))
+end
+local rkey = id .. ',' .. ARGV[3]
+local retries = tonumber(redis.call('hget', KEYS[3], rkey))
+if (not retries) then
+  return redis.error_reply(
+    string.format('missing retry count %s %s', id, ARGV[3]))
+end
+rkey = rkey .. ',' .. retries
+redis.call('zadd', KEYS[4], ts, rkey)
+redis.call('hset', KEYS[5], rkey, ARGV[4])
+local status = redis.call('hget', KEYS[2], id)
+status = status .. ',' .. retries .. ',' .. ts
+redis.call('hset', KEYS[2], id, status)
+redis.call('hdel', KEYS[3], id .. ',' .. KEYS[6])
+redis.call('zadd', KEYS[6], ts, id)
+return id
 EOF
   FAIL_TASK_SHA = Digest::SHA1.hexdigest(FAIL_TASK)
 
-  def fail(id, worker, reason, timestamp = Time.now.to_f)
-    working = @working_prefix + worker.to_s
-    keys = [working, @jobstatus, @failz, @tasks]
-    argv = [id, timestamp, JSON.generate(reason)]
+  def fail(id, task, details, timestamp = Time.now.to_f)
+    keys = [@tasks, @status, @retries, @failz, @failures, @report_queue]
+    argv = [id, timestamp, @que_prefix + task, JSON.generate(details)]
     id == redis_eval(FAIL_TASK_SHA, FAIL_TASK, keys, argv)
   end
 
-  def retry(id, task, run_at = Time.now.to_f)
-    queue = @que_prefix + task.to_s
-    redis.multi do |r|
-      r.zrem(@failz, id)
-      r.hset(@jobstatus, id, "#{queue},#{run_at}")
-      r.zadd(queue, run_at, id)
+  def get_failures(failz)
+    result = Hash.new { Array.new }
+    fkeys = failz.keys
+    if fkeys.size > 0
+      failures = redis.hmget(@failures, fkeys)
+      fkeys.zip(failures).each do |key, details|
+        id, queue, r = key.split(',')
+        r = r.to_i
+        task = self.class.strip_prefix(queue, @que_prefix)
+        result[id] <<= {
+          task: task, retries: r, ts: failz[key],
+          details: JSON.parse(details) }
+      end
     end
+    result
   end
 
-  def get_failures(earliest = 0, latest = Time.now.to_f, limit = -100)
-    if limit < 0
-      redis.zrevrangebyscore(@failz, latest, earliest, limit: [0, -limit])
-    else
-      redis.zrangebyscore(@failz, earliest, latest, limit: [0, limit])
-    end
+  def get_failz(earliest = 0, latest = Time.now.to_f, limit = -100)
+    values =
+      if limit < 0
+        redis.zrevrangebyscore(
+        @failz, latest, earliest, limit: [0, -limit], with_scores: true)
+      else
+        redis.zrangebyscore(
+        @failz, earliest, latest, limit: [0, limit], with_scores: true)
+      end
+    result = {}
+    values.each { |v| result[v[0]] = v[1] }
+    result
   end
 
-  CLEAR_FAILED_JOBS = <<EOF
-local i = 1
-while ARGV[i] do
-  local id = ARGV[i]
-  redis.call('zrem', KEYS[1], id)
-  redis.call('hdel', KEYS[2], id)
-  redis.call('hdel', KEYS[3], id)
-  redis.call('hdel', KEYS[4], id)
-  local ukey = redis.call('hget', KEYS[5], id)
-  if ukey then
-    redis.call('hdel', KEYS[5], ukey)
-    redis.call('hdel', KEYS[5], id)
-  end
-i = i + 1
-end
-EOF
-  CLEAR_FAILED_JOBS_SHA = Digest::SHA1.hexdigest(CLEAR_FAILED_JOBS)
-
-  def clear_failed_jobs(*ids)
-    keys = [@failz, @tasks, @args, @jobstatus, @unique]
-    redis_eval(CLEAR_FAILED_JOBS_SHA, CLEAR_FAILED_JOBS, keys, ids)
-  end
-
-  def retire_worker(worker)
-    succeed('', worker, [[]])
-    1 == redis.hdel(@workers, @working_prefix + worker.to_s)
+  def failures(*args)
+    get_failures(get_failz(*args))
   end
 
   def delete_queue(queue)
@@ -309,40 +304,81 @@ EOF
     result.keys.map { |k| self.class.strip_prefix(k, @que_prefix) }
   end
 
-  def workers
-    result = redis.hgetall(@workers)
-    result.keys.map { |k| self.class.strip_prefix(k, @working_prefix) }
-  end
-
   def queue_length(queue)
     redis.zcard(@que_prefix + queue) || 0
   end
 
+  def decode_job_status(status)
+    queue, ts, *retries = status.split(',')
+    ts = ts.to_f
+    timestamps = [ts]
+    while retries.size > 0
+      i = retries.shift.to_i
+      timestamps[i] = retries.shift.to_f
+    end
+    return queue, timestamps
+  end
+
+  def remove_job(id)
+    status = redis.hget(@status, id)
+    queue, timestamps = decode_job_status(status)
+    redis.multi do |r|
+      if queue.start_with?(@que_prefix)
+        r.zrem(queue, id)
+        rkey = "#{id},#{queue}"
+        r.hdel(@retries, rkey)
+        rkeys = []
+        timestamps.drop(1).each_with_index do |ts, i|
+          rkeys << rkey + ",#{i + 1}"
+        end
+        if rkeys.size > 0
+          r.hdel(@failures, rkeys)
+          r.zrem(@failz, rkeys)
+        end
+      end
+      r.hdel(@args, id)
+      r.hdel(@tasks, id)
+    end
+    check_status = redis.hget(@status, id)
+    return if check_status.nil?
+    if check_status == status
+      redis.hdel(@status, id)
+      if (uid = redis.hget(@unique, id))
+        redis.hdel(@unique, [id, uid])
+      end
+    else
+      remove_job(id)
+    end
+  end
+
   def job_status(*ids)
-    statuses = redis.hmget(@jobstatus, *ids)
+    statuses = redis.hmget(@status, *ids)
     result = {}
     ids.zip(statuses).each do |(id, status)|
       next unless status
-      result[id] = self.class.match_prefix(status,
-        { @que_prefix => Proc.new do |s|
-            task, run_at = s.split(',')
-            { state: :enqueued, task: task, run_at: run_at.to_f }
-          end,
-          @working_prefix => Proc.new do |s|
-            worker, queue_key, ts = s.split(',')
-            task = self.class.strip_prefix(queue_key, @que_prefix)
-            { state: :working, task: task, worker: worker, ts: ts.to_f }
-          end,
-          @failz + ',' => Proc.new do |s|
-            task, working, ts, reason = s.split(',', 4)
-            reason = JSON.parse(reason)
-            worker = self.class.strip_prefix(working, @working_prefix)
-            { state: :failed, task: task, worker: worker, ts: ts.to_f,
-              reason: reason }
-          end
-        })
+      queue, timestamps = decode_job_status(status)
+      result[id] = {
+        task: self.class.strip_prefix(queue, @que_prefix),
+        timestamps: timestamps }
     end
     result
+  end
+
+  def fill_job_failures(statuses)
+    failz = {}
+    statuses.each do |id, status|
+      next unless (task = status[:task])
+      timestamps = status[:timestamps]
+      next unless timestamps.size > 1
+      queue = @que_prefix + task
+      timestamps.drop(1).each_with_index do |ts, i|
+        failz["#{id},#{queue},#{i+1}"] = ts
+      end
+    end
+    get_failures(failz).each do |id, failures|
+      statuses[id][:failures] = failures
+    end
+    statuses
   end
 
   def queue_stats(chunks = 3, latest = Time.now.to_f)
@@ -367,7 +403,7 @@ EOF
 
   def push_report(id, timestamp = Time.now.to_f)
     redis.multi do |r|
-      r.hdel(@report_retries, id)
+      r.hdel(@retries, "#{id},#{@report_queue}")
       r.zadd(@report_queue, timestamp, id)
     end
   end
@@ -376,8 +412,8 @@ EOF
 local t_pop = tonumber(ARGV[1])
 local elem = redis.call('zrange', KEYS[1], 0, 0, 'withscores')
 local t_elem = elem[2] and tonumber(elem[2])
-if (t_elem and t_elem < t_pop) then
-  local retries = redis.call('hincrby', KEYS[2], elem[1], 1)
+if (elem[2] and tonumber(elem[2]) < t_pop) then
+  local retries = redis.call('hincrby', KEYS[2], elem[1] .. ',' .. KEYS[1], 1)
   local t_retry = t_pop + tonumber(ARGV[2]) * 2 ^ retries
   redis.call('zadd', KEYS[1], t_retry, elem[1])
   elem[3] = retries
@@ -388,20 +424,51 @@ EOF
 
   def pop_report(timestamp = Time.now.to_f)
     result = redis_eval(
-      REPORT_POP_SHA, REPORT_POP, [@report_queue, @report_retries],
+      REPORT_POP_SHA, REPORT_POP, [@report_queue, @retries],
       [timestamp, REPORT_RETRY_DELAY])
     result[1] = result[1].to_f if result
     result
   end
 
   REPORT_COMPLETE = <<EOF
-if (redis.call('hdel', KEYS[2], ARGV[1]) > 0) then
+if (redis.call('hdel', KEYS[2], ARGV[1] .. ',' .. KEYS[1]) > 0) then
   redis.call('zrem', KEYS[1], ARGV[1])
 end
 EOF
   REPORT_COMPLETE_SHA = Digest::SHA1.hexdigest(REPORT_COMPLETE)
   def complete_report(id)
     redis_eval(REPORT_COMPLETE_SHA, REPORT_COMPLETE,
-      [@report_queue, @report_retries], [id])
+      [@report_queue, @retries], [id])
+  end
+
+  def put_env(topic, h)
+    return if h.empty?
+    kvs = []
+    h.each { |k, v| kvs << k << v }
+    hkey = @env_prefix + topic.to_s
+    'OK' == redis.hmset(hkey, *kvs)
+  end
+
+  def rm_env(topic, keys = nil)
+    hkey = @env_prefix + topic.to_s
+    if keys.nil?
+      redis.del(hkey)
+    elsif !keys.empty?
+      redis.hdel(hkey, keys)
+    end
+  end
+
+  def get_env(topic, keys = nil)
+    hkey = @env_prefix + topic.to_s
+    if keys.nil?
+      redis.hgetall(hkey)
+    elsif keys.empty?
+      {}
+    else
+      result = {}
+      values = redis.hmget(hkey, keys)
+      keys.zip(values).each { |k, v| result[k] = v }
+      result
+    end
   end
 end
