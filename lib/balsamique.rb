@@ -21,8 +21,8 @@ class Balsamique
     @report_queue = @que_prefix + '_report'
   end
 
-  REPORT_RETRY_DELAY = 60 # seconds
-  RETRY_DELAY = 600 # seconds
+  REPORT_RETRY_DELAY = 60.0 # seconds
+  RETRY_DELAY = 600.0 # seconds
 
   def redis
     @redis
@@ -103,7 +103,7 @@ end
 redis.call('hset', KEYS[1], id, ARGV[1])
 redis.call('hset', KEYS[2], id, ARGV[2])
 redis.call('hset', KEYS[3], id, KEYS[4] .. ',' .. ARGV[3])
-redis.call('zadd', KEYS[4], tonumber(ARGV[3]), id)
+redis.call('zadd', KEYS[4], ARGV[3], id)
 redis.call('hset', KEYS[5], KEYS[4], id .. ',' .. ARGV[3])
 return id
 EOF
@@ -135,9 +135,9 @@ local ts = tonumber(ARGV[1])
 local i = 5
 while KEYS[i] do
   local elem = redis.call('zrange', KEYS[i], 0, 0, 'withscores')
-  if elem[2] and tonumber(elem[2]) <= ts then
+  if elem[2] and tonumber(elem[2]) < ts then
     local retries = redis.call('hincrby', KEYS[4], elem[1] .. ',' .. KEYS[i], 1)
-    local t_retry = ts + tonumber(ARGV[2]) * 2 ^ retries
+    local t_retry = ts + ARGV[2] * 2 ^ retries
     redis.call('zadd', KEYS[i], t_retry, elem[1])
     redis.call('hset', KEYS[3], KEYS[i] .. ',len,' .. ARGV[3],
       redis.call('zcard', KEYS[i]))
@@ -169,7 +169,7 @@ EOF
 
   SUCCEED_TASK = <<EOF
 local id = ARGV[1]
-local ts = tonumber(ARGV[2])
+local ts = ARGV[2]
 local tasks = cjson.decode(redis.call('hget', KEYS[1], id))
 local cur_task = ''
 for _, task in ipairs(tasks) do
@@ -222,7 +222,7 @@ EOF
 
   FAIL_TASK = <<EOF
 local id = ARGV[1]
-local ts = tonumber(ARGV[2])
+local ts = ARGV[2]
 local tasks = cjson.decode(redis.call('hget', KEYS[1], id))
 local cur_task = ''
 for _, task in ipairs(tasks) do
@@ -411,13 +411,14 @@ EOF
   REPORT_POP = <<EOF
 local t_pop = tonumber(ARGV[1])
 local elem = redis.call('zrange', KEYS[1], 0, 0, 'withscores')
-local t_elem = elem[2] and tonumber(elem[2])
-if (elem[2] and tonumber(elem[2]) < t_pop) then
+local t_elem = tonumber(elem[2])
+if (t_elem and t_elem < t_pop) then
   local retries = redis.call('hincrby', KEYS[2], elem[1] .. ',' .. KEYS[1], 1)
   local t_retry = t_pop + tonumber(ARGV[2]) * 2 ^ retries
   redis.call('zadd', KEYS[1], t_retry, elem[1])
   elem[3] = retries
-  return elem
+  elem[2] = t_elem
+  return cjson.encode(elem)
 end
 EOF
   REPORT_POP_SHA = Digest::SHA1.hexdigest(REPORT_POP)
@@ -426,8 +427,7 @@ EOF
     result = redis_eval(
       REPORT_POP_SHA, REPORT_POP, [@report_queue, @retries],
       [timestamp, REPORT_RETRY_DELAY])
-    result[1] = result[1].to_f if result
-    result
+    result &&= JSON.parse(result)
   end
 
   REPORT_COMPLETE = <<EOF

@@ -53,15 +53,10 @@ describe Balsamique do
     fail_reason = { 'message' => 'Test Fail' }
     expect(@bq.fail(id, task, fail_reason, t1)).to eq(true)
     job_status = @bq.job_status(id)
-    expect(job_status[id]).to match({
-        task: task, timestamps: [Float, Float] })
-    timestamps = job_status[id][:timestamps]
-    expect((timestamps[0] - t0).abs).to be < 0.0001
-    expect((timestamps[1] - t1).abs).to be < 0.0001
+    expect(job_status[id]).to eq({ task: task, timestamps: [t0, t1] })
     failures = @bq.failures
-    expect(failures).to match({
-        id => [{ task: task, retries: 1, ts: Float, details: fail_reason }] })
-    expect((failures[id].first[:ts] - t1).abs).to be < 0.0001
+    expect(failures).to eq({
+        id => [{ task: task, retries: 1, ts: t1, details: fail_reason }] })
     @bq.fill_job_failures(job_status)
     expect(job_status[id][:failures]).to eq(failures[id])
     @bq.remove_job(id)
@@ -125,7 +120,9 @@ describe Balsamique do
     id = random_name
     @bq.push_report(id, timestamp)
     expect(@bq.pop_report(timestamp - 0.001)).to be nil
-    expect(@bq.pop_report(pop_time)).to eq([id, timestamp, 1])
+    popped = @bq.pop_report(pop_time)
+    expect(popped).to match([id, Float, 1])
+    expect(popped[1]).to be_within(0.0001).of(timestamp)
     expect(@bq.pop_report(timestamp + 0.002)).to be nil
     @bq.complete_report(id)
     pop_time += Balsamique::REPORT_RETRY_DELAY * 600
@@ -137,10 +134,14 @@ describe Balsamique do
     pop_time = timestamp + 0.001
     id = random_name
     @bq.push_report(id, timestamp)
-    expect(@bq.pop_report(pop_time)).to eq([id, timestamp, 1])
+    popped = @bq.pop_report(pop_time)
+    expect(popped).to match([id, Float, 1])
+    expect(popped[1]).to be_within(0.0001).of(timestamp)
     @bq.push_report(id, pop_time)
     @bq.complete_report(id)
-    expect(@bq.pop_report(pop_time + 0.001)).to eq([id, pop_time, 1])
+    popped = @bq.pop_report(pop_time + 0.001)
+    expect(popped).to match([id, Float, 1])
+    expect(popped[1]).to be_within(0.0001).of(pop_time)
     @bq.complete_report(id)
     pop_time += Balsamique::REPORT_RETRY_DELAY * 600
     expect(@bq.pop_report(pop_time)).to be nil
@@ -151,14 +152,15 @@ describe Balsamique do
     pop_time = timestamp + 0.001
     id = random_name
     @bq.push_report(id, timestamp)
-    expect(@bq.pop_report(pop_time)).to eq([id, timestamp, 1])
+    result = @bq.pop_report(pop_time)
+    expect(result).to match([id, Float, 1])
+    expect(result[1]).to be_within(0.0001).of(timestamp)
+
     (1..6).each do |count|
       pop_time += 0.001 + Balsamique::REPORT_RETRY_DELAY * 2**count
       result = @bq.pop_report(pop_time)
-      expect(result.size).to eq(3)
-      expect(result[0]).to eq(id)
-      expect((result[1] - pop_time + 0.001).abs).to be < 0.0001
-      expect(result[2]).to eq(count + 1)
+      expect(result).to match([id, Float, count + 1])
+      expect(result[1]).to be_within(0.0001).of(pop_time - 0.001)
     end
     @bq.complete_report(id)
     pop_time += Balsamique::REPORT_RETRY_DELAY * 600
@@ -171,20 +173,24 @@ describe Balsamique do
     (1..10).each { |i| h[random_name] = rand(2**i).to_s }
     @bq.put_env(topic, h)
     expect(@bq.get_env(topic)).to eq(h)
+
     keys = h.keys.sample(5)
     keys << random_name
     h_selected = h.select { |k, _| keys.include?(k) }
     h_selected[keys.last] = nil
     expect(@bq.get_env(topic, keys)).to eq(h_selected)
+
     h2 = {}
     keys.each { |k| h2[k] = random_name }
     (1..5).each { |i| h2[random_name] = rand(2**i).to_s }
     @bq.put_env(topic, h2)
     h_merged = h.merge(h2)
     expect(@bq.get_env(topic)).to eq(h_merged)
+
     @bq.rm_env(topic, keys)
     h_reduced = h_merged.select { |k, _| !keys.include? k }
     expect(@bq.get_env(topic)).to eq(h_reduced)
+
     @bq.rm_env(topic)
     expect(@bq.get_env(topic)).to eq({})
   end
