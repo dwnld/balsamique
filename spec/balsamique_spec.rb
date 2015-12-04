@@ -41,14 +41,22 @@ describe Balsamique do
 
       mtasks[i] << random_name # Record output of task
       expect(@bq.succeed(id, mtasks)).to eq(true)
+      expect(@bq.pop_report).to match([id, Float, 1])
+      @bq.complete_report(id)
+      expect(@bq.pop_report).to be nil
     end
+    expect(@bq.queues.all? { |q| @bq.queue_length(q) == 0 }).to eq(true)
+    expect(@bq.job_status(id)[id]).to include({ task: nil })
+    @bq.remove_job(id)
+    expect(@bq.job_status(id)).to eq({})
   end
 
   it 'allows a worker to record a task failure' do
     t0 = Time.now.to_f
-    queued, id = @bq.enqueue(tasks, args, nil, t0)
+    _queued, id = @bq.enqueue(tasks, args, nil, t0)
     task = tasks.first.first
     job = @bq.dequeue([task])
+    expect(job).to eq({ id: id, args: args, tasks: tasks, retries: 1 })
     t1 = Time.now.to_f
     fail_reason = { 'message' => 'Test Fail' }
     expect(@bq.fail(id, task, fail_reason, t1)).to eq(true)
@@ -59,8 +67,58 @@ describe Balsamique do
         id => [{ task: task, retries: 1, ts: t1, details: fail_reason }] })
     @bq.fill_job_failures(job_status)
     expect(job_status[id][:failures]).to eq(failures[id])
+    report = @bq.pop_report
+    expect(report).to match([id, Float, 1])
+    expect(report[1]).to be_within(0.0001).of(t1)
+    @bq.complete_report(id)
+    expect(@bq.pop_report).to be nil
     @bq.remove_job(id)
     expect(@bq.failures).to eq({})
+  end
+
+  it 'automatically retries tasks with exponential backoff' do
+    retry_delay = Balsamique::RETRY_DELAY * 3
+    t0 = Time.now.to_f
+    pop_time = t0 + 0.001
+    timestamps = [t0]
+    _queued, id = @bq.enqueue(tasks, args, nil, t0)
+    task = tasks.first.first
+    job = @bq.dequeue([task], retry_delay, pop_time)
+    expect(job).to eq({ id: id, args: args, tasks: tasks, retries: 1 })
+    failure = { 'message' => 'we broke it', 'times' => 1 }
+    timestamps << (pop_time + 1)
+    @bq.fail(id, task, failure, pop_time + 1)
+    job_status = @bq.job_status(id)
+    @bq.fill_job_failures(job_status)
+    expect(job_status).to match(
+      id => { task: task, timestamps: timestamps, failures: Array })
+    expect(job_status[id][:failures].size).to eq(1)
+    expect(job_status[id][:failures].last).to include(
+      task: task, details: failure, ts: timestamps.last, retries: 1)
+    report = @bq.pop_report(timestamps.last + 1)
+    expect(report).to match ([id, Float, 1])
+    expect(report[1]).to be_within(0.0001).of(timestamps.last)
+
+    (1..6).each do |count|
+      pop_time += retry_delay * 2**count - 0.001
+      expect(@bq.dequeue([task], retry_delay, pop_time)).to be nil
+      pop_time += 0.002
+      job = @bq.dequeue([task], retry_delay, pop_time)
+      expect(job).to eq({ id: id, args: args, tasks: tasks, retries: count + 1})
+      failure = { 'message' => 'we broke it', 'times' => count + 1 }
+      timestamps << (pop_time + 1)
+      @bq.fail(id, task, failure, pop_time + 1)
+      job_status = @bq.job_status(id)
+      @bq.fill_job_failures(job_status)
+      expect(job_status).to match(
+        id => { task: task, timestamps: timestamps, failures: Array })
+      expect(job_status[id][:failures].size).to eq(count + 1)
+      expect(job_status[id][:failures].last).to include(
+        task: task, details: failure, ts: timestamps.last, retries: count + 1)
+      report = @bq.pop_report(timestamps.last + 1)
+      expect(report).to match ([id, Float, 1])
+      expect(report[1]).to be_within(0.0001).of(timestamps.last)
+    end
   end
 
   it 'allows a queue to be deleted' do
