@@ -381,6 +381,18 @@ EOF
     statuses
   end
 
+  def fill_args_tasks(statuses)
+    ids = statuses.keys
+    args, tasks = redis.multi do |r|
+      r.hmget(@args, ids)
+      r.hmget(@tasks, ids)
+    end
+    ids.zip(args, tasks).each do |id, a, t|
+      statuses[id][:args] = a && JSON.parse(a)
+      statuses[id][:tasks] = t && JSON.parse(t)
+    end
+  end
+
   def queue_stats(chunks = 3, latest = Time.now.to_f)
     last_chunk, last_slice = self.class.slice_timestamp(latest)
     stats = {}
