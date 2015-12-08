@@ -84,5 +84,6 @@ describe Balsamique::Reporter do
           'tasks' => mtasks)
       expect(r_status['timestamps'].first).to be_within(0.0001).of(r_ts)
     end
+    expect(@bq.job_status(id)).to eq({})
   end
 end
