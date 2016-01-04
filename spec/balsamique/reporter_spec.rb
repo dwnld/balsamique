@@ -3,7 +3,6 @@ require 'securerandom'
 Bundler.require(:default, :test)
 require 'balsamique/reporter'
 
-
 describe Balsamique::Reporter do
   class TestLogger
     def initialize

@@ -52,8 +52,8 @@ class Balsamique
     end
   end
 
-  STATS_SLICE = 10 # seconds
-  STATS_CHUNK = 90 # slices (= 900 seconds = 15 minutes)
+  STATS_SLICE = 60 # seconds
+  STATS_CHUNK = 60 # slices (= 3600 seconds = 1 hr)
   def self.slice_timestamp(ts)
     slice = ts.to_i / STATS_SLICE
     return slice / STATS_CHUNK, slice % STATS_CHUNK
@@ -142,7 +142,7 @@ while KEYS[i] do
     redis.call('hset', KEYS[3], KEYS[i] .. ',len,' .. ARGV[3],
       redis.call('zcard', KEYS[i]))
     redis.call('hincrby', KEYS[3], KEYS[i] .. ',dq,' .. ARGV[3], 1)
-    redis.call('expire', KEYS[3], 21600)
+    redis.call('expire', KEYS[3], 90000)
     return({ elem[1],
       redis.call('hget', KEYS[1], elem[1]),
       redis.call('hget', KEYS[2], elem[1]), retries })
@@ -304,6 +304,38 @@ EOF
     result.keys.map { |k| self.class.strip_prefix(k, @que_prefix) }
   end
 
+  def queues_info
+    qs_info = redis.hgetall(@queues)
+    return {} if qs_info.empty?
+    now = Time.now.to_f
+    details = redis.multi do |r|
+      qs_info.keys.each do |key|
+        r.zrange(key, 0, 0, withscores: true)
+        r.zcount(key, 0, now)
+        r.zcard(key)
+      end
+    end
+    result = {}
+    qs_info.keys.each_with_index do |key, i|
+      i3 = 3 * i
+      queue = self.class.strip_prefix(key, @que_prefix)
+      last_id, last_ts = qs_info[key].split(',')
+      last_ts = last_ts.to_f
+      next_id = next_ts = nil
+      if (next_info = details[i3].first)
+        next_id = next_info.first
+        next_ts = next_info.last
+      end
+      result[queue] = {
+        current_ts: now,
+        last_id: last_id, last_ts: last_ts,
+        total: details[i3 + 2], ready: details[i3 + 1],
+        next_id: next_id, next_ts: next_ts
+      }
+    end
+    result
+  end
+
   def queue_length(queue)
     redis.zcard(@que_prefix + queue) || 0
   end
@@ -320,7 +352,7 @@ EOF
   end
 
   def remove_job(id)
-    status = redis.hget(@status, id)
+    return unless (status = redis.hget(@status, id))
     queue, timestamps = decode_job_status(status)
     redis.multi do |r|
       if queue.start_with?(@que_prefix)
@@ -339,8 +371,7 @@ EOF
       r.hdel(@args, id)
       r.hdel(@tasks, id)
     end
-    check_status = redis.hget(@status, id)
-    return if check_status.nil?
+    return unless (check_status = redis.hget(@status, id))
     if check_status == status
       redis.hdel(@status, id)
       if (uid = redis.hget(@unique, id))

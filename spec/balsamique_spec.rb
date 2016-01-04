@@ -29,6 +29,18 @@ describe Balsamique do
     mtasks.each_with_index do |task, i|
       expect(@bq.queues).to eq(queues.take(i + 1))
       expect(@bq.queue_length(queues[i])).to eq(1)
+      expect(@bq.queues_info.keys).to eq(@bq.queues)
+      @bq.queues_info.each do |queue, info|
+        if queue == queues[i]
+          expect(info).to match(
+            current_ts: Float, last_id: id, last_ts: Float,
+            total: 1, ready: 1, next_id: id, next_ts: Float)
+        else
+          expect(info).to match(
+            current_ts: Float, last_id: id, last_ts: Float,
+            total: 0, ready: 0, next_id: nil, next_ts: nil)
+        end
+      end
       job_status = @bq.job_status(id)
       expect(job_status.keys).to eq([id])
       expect(job_status[id]).to include({ task: task.first })
