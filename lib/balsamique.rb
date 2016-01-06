@@ -24,6 +24,10 @@ class Balsamique
   REPORT_RETRY_DELAY = 60.0 # seconds
   RETRY_DELAY = 600.0 # seconds
 
+  def rand_delay(delay = RETRY_DELAY)
+    delay - 0.5 * rand() * delay
+  end
+
   def redis
     @redis
   end
@@ -152,7 +156,7 @@ end
 EOF
   DEQUEUE_TASK_SHA = Digest::SHA1.hexdigest(DEQUEUE_TASK)
 
-  def dequeue(tasks, retry_delay = RETRY_DELAY, timestamp = Time.now.to_f)
+  def dequeue(tasks, retry_delay = rand_delay, timestamp = Time.now.to_f)
     stats_chunk, stats_slice = self.class.enc36_slice_timestamp(timestamp)
     questats_key = @questats_prefix + stats_chunk
     keys = [@args, @tasks, questats_key, @retries]
