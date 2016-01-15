@@ -266,9 +266,9 @@ describe Balsamique do
   end
 
   it 'allows initializing job id floor' do
-    id_floor = rand(2_000_000_000)
-    @bq.set_id_floor(id_floor)
+    id_floors = (1..200).map { |i| rand(10_000_000 * i) }
+    id_floors.each { |id_floor| @bq.set_id_floor(id_floor) }
     queued, id = @bq.enqueue(tasks, args)
-    expect(id).to eq((id_floor + 1).to_s)
+    expect(id).to eq((id_floors.max + 1).to_s)
   end
 end
