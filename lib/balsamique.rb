@@ -24,6 +24,10 @@ class Balsamique
   REPORT_RETRY_DELAY = 60.0 # seconds
   RETRY_DELAY = 600.0 # seconds
 
+  def rand_delay(delay = RETRY_DELAY)
+    delay - 0.5 * rand() * delay
+  end
+
   def redis
     @redis
   end
@@ -72,6 +76,18 @@ class Balsamique
   end
   def self.dec36_assemble_timestamp(echunk, eslice)
     self.assemble_timestamp(self.dec36(echunk), self.dec36(eslice))
+  end
+
+  SET_ID_FLOOR = <<EOF
+local floor = tonumber(ARGV[1])
+local id = tonumber(redis.call('hget', KEYS[1], ''))
+if (not id) or floor > id then
+  redis.call('hset', KEYS[1], '', floor)
+end
+EOF
+  SET_ID_FLOOR_SHA = Digest::SHA1.hexdigest(SET_ID_FLOOR)
+  def set_id_floor(id_floor)
+    redis_eval(SET_ID_FLOOR_SHA, SET_ID_FLOOR, [@unique], [id_floor.to_i])
   end
 
   # Lua script ENQUEUE_JOB takes keys
@@ -152,7 +168,7 @@ end
 EOF
   DEQUEUE_TASK_SHA = Digest::SHA1.hexdigest(DEQUEUE_TASK)
 
-  def dequeue(tasks, retry_delay = RETRY_DELAY, timestamp = Time.now.to_f)
+  def dequeue(tasks, retry_delay = rand_delay, timestamp = Time.now.to_f)
     stats_chunk, stats_slice = self.class.enc36_slice_timestamp(timestamp)
     questats_key = @questats_prefix + stats_chunk
     keys = [@args, @tasks, questats_key, @retries]

@@ -264,4 +264,11 @@ describe Balsamique do
     @bq.rm_env(topic)
     expect(@bq.get_env(topic)).to eq({})
   end
+
+  it 'allows initializing job id floor' do
+    id_floors = (1..200).map { |i| rand(10_000_000 * i) }
+    id_floors.each { |id_floor| @bq.set_id_floor(id_floor) }
+    queued, id = @bq.enqueue(tasks, args)
+    expect(id).to eq((id_floors.max + 1).to_s)
+  end
 end
