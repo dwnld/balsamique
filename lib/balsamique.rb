@@ -78,6 +78,18 @@ class Balsamique
     self.assemble_timestamp(self.dec36(echunk), self.dec36(eslice))
   end
 
+  SET_ID_FLOOR = <<EOF
+local floor = tonumber(ARGV[1])
+local id = tonumber(redis.call('hget', KEYS[1], ''))
+if (not id) or floor > id then
+  redis.call('hset', KEYS[1], '', floor)
+end
+EOF
+  SET_ID_FLOOR_SHA = Digest::SHA1.hexdigest(SET_ID_FLOOR)
+  def set_id_floor(id_floor)
+    redis_eval(SET_ID_FLOOR_SHA, SET_ID_FLOOR, [@unique], [id_floor.to_i])
+  end
+
   # Lua script ENQUEUE_JOB takes keys
   # [tasks_h, args_h, jobstat_h, task1_z, queues_h, uniq_h]
   # and args [tasks, args, run_at, uniq].
