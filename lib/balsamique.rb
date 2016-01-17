@@ -283,7 +283,7 @@ EOF
         task = self.class.strip_prefix(queue, @que_prefix)
         result[id] <<= {
           task: task, retries: r, ts: failz[key],
-          details: JSON.parse(details) }
+          details: details && JSON.parse(details) }
       end
     end
     result

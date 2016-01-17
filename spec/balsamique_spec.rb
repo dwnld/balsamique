@@ -117,19 +117,25 @@ describe Balsamique do
       pop_time += 0.002
       job = @bq.dequeue([task], retry_delay, pop_time)
       expect(job).to eq({ id: id, args: args, tasks: tasks, retries: count + 1})
-      failure = { 'message' => 'we broke it', 'times' => count + 1 }
-      timestamps << (pop_time + 1)
-      @bq.fail(id, task, failure, pop_time + 1)
+      if (1 == count % 2)
+        failure = { 'message' => 'we broke it', 'times' => count + 1 }
+        timestamps << (pop_time + 1)
+        @bq.fail(id, task, failure, pop_time + 1)
+      end
       job_status = @bq.job_status(id)
       @bq.fill_job_failures(job_status)
       expect(job_status).to match(
         id => { task: task, timestamps: timestamps, failures: Array })
-      expect(job_status[id][:failures].size).to eq(count + 1)
-      expect(job_status[id][:failures].last).to include(
-        task: task, details: failure, ts: timestamps.last, retries: count + 1)
-      report = @bq.pop_report(timestamps.last + 1)
-      expect(report).to match ([id, Float, 1])
-      expect(report[1]).to be_within(0.0001).of(timestamps.last)
+      expect(job_status[id][:failures].size).to eq(count + count % 2)
+      if (1 == count % 2)
+        expect(job_status[id][:failures].last).to include(
+          task: task, details: failure, ts: timestamps.last, retries: count + 1)
+        report = @bq.pop_report(timestamps.last + 1)
+        expect(report).to match ([id, Float, 1])
+        expect(report[1]).to be_within(0.0001).of(timestamps.last)
+      else
+        timestamps << nil
+      end
     end
   end
 
