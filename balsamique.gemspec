@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name = 'balsamique'
-  s.version = '0.1.2'
+  s.version = '0.1.3'
   s.summary = 'Redis-backed Job Queue System'
   s.description = <<EOF
 Balsamique (pronounced "Balsami-QUEUE") is a Redis-backed Ruby library
