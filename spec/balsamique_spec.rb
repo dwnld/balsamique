@@ -277,4 +277,22 @@ describe Balsamique do
     queued, id = @bq.enqueue(tasks, args)
     expect(id).to eq((id_floors.max + 1).to_s)
   end
+
+  it 'allows peeking at queue contents' do
+    timestamp = Time.now.to_i
+    queues = tasks.map(&:first)
+    q_contents = {}
+    (0..99).each do |i|
+      ts = timestamp + i * 0.001
+      queued, id = @bq.enqueue(tasks, args, nil, timestamp + i * 0.001)
+      q_contents[id] = { ts: ts, retries: 0 }
+    end
+    (0..49).each do |i|
+      ts = timestamp + 1 + i * 0.001
+      job = @bq.dequeue(queues, 1, ts)
+      expect(job[:id]).to eq(q_contents.keys[i])
+      q_contents[job[:id]] = { ts: ts + 2, retries: 1 }
+    end
+    expect(@bq.queue_peek(queues.first, 100)).to eq(q_contents)
+  end
 end

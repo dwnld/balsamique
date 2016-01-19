@@ -356,6 +356,21 @@ EOF
     redis.zcard(@que_prefix + queue) || 0
   end
 
+  def queue_peek(queue, n = 1000)
+    qkey = @que_prefix + queue
+    result = {}
+    redis.zrange(qkey, 0, n - 1, with_scores: true).each do |item|
+      result[item[0]] = { ts: item[1] }
+    end
+    return result if result.empty?
+    retries = redis.hmget(@retries, result.keys.map { |id| "#{id},#{qkey}" })
+    result.keys.zip(retries).each do |item|
+      id, r = item
+      result[id][:retries] = r.to_i
+    end
+    result
+  end
+
   def decode_job_status(status)
     queue, ts, *retries = status.split(',')
     ts = ts.to_f
