@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name = 'balsamique'
-  s.version = '0.1.4'
+  s.version = '0.1.5'
   s.summary = 'Redis-backed Job Queue System'
   s.description = <<EOF
 Balsamique (pronounced "Balsami-QUEUE") is a Redis-backed Ruby library
@@ -17,6 +17,6 @@ EOF
   s.email = 'keith@dwnld.me'
   s.homepage = 'https://github.com/dwnld/balsamique'
   s.licenses = ['MIT']
-  s.files = ['lib/balsamique.rb']
+  s.files = ['lib/balsamique.rb', 'lib/balsamique/reporter.rb']
   s.add_runtime_dependency 'redis'
 end
