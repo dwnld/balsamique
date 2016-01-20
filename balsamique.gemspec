@@ -18,5 +18,5 @@ EOF
   s.homepage = 'https://github.com/dwnld/balsamique'
   s.licenses = ['MIT']
   s.files = ['lib/balsamique.rb', 'lib/balsamique/reporter.rb']
-  s.add_runtime_dependency 'redis'
+  s.add_runtime_dependency 'redis', '~> 3'
 end

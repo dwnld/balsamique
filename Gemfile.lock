@@ -2,7 +2,7 @@ PATH
   remote: .
   specs:
     balsamique (0.1.5)
-      redis
+      redis (~> 3)
 
 GEM
   remote: https://rubygems.org/
