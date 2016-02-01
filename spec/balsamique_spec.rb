@@ -306,12 +306,12 @@ describe Balsamique do
       q_contents[id] = { ts: ts, retries: 0 }
     end
     later_timestamp = timestamp + 50
-    expect(@bq.accelerate_retries(queue, 0.01, later_timestamp)).to eq 50
-    count = 0
+    expect(@bq.accelerate_retries(queue, 0.125, later_timestamp)).to eq 50
+    ts = later_timestamp
     q_contents.each do |id, props|
       if props[:ts] >= later_timestamp
-        props[:ts] = later_timestamp + 0.01 * count
-        count += 1
+        props[:ts] = ts
+        ts += 0.125
       end
     end
     expect(@bq.queue_peek(queue, 100)).to eq(q_contents)
