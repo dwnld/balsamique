@@ -297,7 +297,7 @@ describe Balsamique do
   end
 
   it 'allows accelerating scheduled tasks' do
-    timestamp = Time.now.to_i
+    timestamp = Time.now.to_i.to_f
     queue = tasks.first.first
     q_contents = {}
     (0..99).each do |i|
