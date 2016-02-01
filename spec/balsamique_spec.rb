@@ -284,7 +284,7 @@ describe Balsamique do
     q_contents = {}
     (0..99).each do |i|
       ts = timestamp + i * 0.001
-      queued, id = @bq.enqueue(tasks, args, nil, timestamp + i * 0.001)
+      queued, id = @bq.enqueue(tasks, args, nil, ts)
       q_contents[id] = { ts: ts, retries: 0 }
     end
     (0..49).each do |i|
@@ -294,5 +294,26 @@ describe Balsamique do
       q_contents[job[:id]] = { ts: ts + 2, retries: 1 }
     end
     expect(@bq.queue_peek(queues.first, 100)).to eq(q_contents)
+  end
+
+  it 'allows accelerating scheduled tasks' do
+    timestamp = Time.now.to_i
+    queue = tasks.first.first
+    q_contents = {}
+    (0..99).each do |i|
+      ts = timestamp + i
+      queued, id = @bq.enqueue(tasks, args, nil, ts)
+      q_contents[id] = { ts: ts, retries: 0 }
+    end
+    later_timestamp = timestamp + 50
+    expect(@bq.accelerate_retries(queue, 0.01, later_timestamp)).to eq 50
+    count = 0
+    q_contents.each do |id, props|
+      if props[:ts] >= later_timestamp
+        props[:ts] = later_timestamp + 0.01 * count
+        count += 1
+      end
+    end
+    expect(@bq.queue_peek(queue, 100)).to eq(q_contents)
   end
 end

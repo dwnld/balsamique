@@ -272,6 +272,25 @@ EOF
     id == redis_eval(FAIL_TASK_SHA, FAIL_TASK, keys, argv)
   end
 
+  ACCELERATE_RETRIES = <<EOF
+local ts = tonumber(ARGV[2])
+local incr = tonumber(ARGV[1])
+local jobs = redis.call('zrangebyscore', KEYS[1], ts, '+inf')
+local count = 0
+for _, job in ipairs(jobs) do
+  redis.call('zadd', KEYS[1], ts, job)
+  count = count + 1
+  ts = ts + incr
+end
+return count
+EOF
+  ACCELERATE_RETRIES_SHA = Digest::SHA1.hexdigest(ACCELERATE_RETRIES)
+
+  def accelerate_retries(queue, incr = 0.001, timestamp = Time.now.to_i)
+    redis_eval(ACCELERATE_RETRIES_SHA, ACCELERATE_RETRIES,
+      [@que_prefix + queue], [incr, timestamp])
+  end
+
   def get_failures(failz)
     result = Hash.new { Array.new }
     fkeys = failz.keys
