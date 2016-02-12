@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    balsamique (0.1.6)
+    balsamique (0.1.7)
       redis (~> 3)
 
 GEM

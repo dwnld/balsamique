@@ -17,7 +17,7 @@ describe Balsamique do
     @bq.redis.flushdb
   end
 
-  let(:tasks) { (1..3).map { |i| [random_name] } }
+  let(:tasks) { (1..3).map { [random_name] } }
   let(:args) { { 'time' => Time.now.to_i, 'rand' => SecureRandom.base64(6) } }
 
   it 'allows processing a job through successive tasks' do
@@ -315,5 +315,23 @@ describe Balsamique do
       end
     end
     expect(@bq.queue_peek(queue, 100)).to eq(q_contents)
+  end
+
+  it 'allows rescheduling tasks' do
+    timestamp = Time.now.to_i.to_f
+    queue = tasks.first.first
+    q_contents = {}
+    (0..99).each do |i|
+      ts = timestamp + i
+      queued, id = @bq.enqueue(tasks, args, nil, ts)
+      q_contents[id] = { ts: ts, retries: 0 }
+    end
+
+    other_timestamp = Time.now.to_f
+    rescheduled = q_contents.keys.sample(50)
+    bogus = (1..50).map { random_name }
+    @bq.reschedule(queue, (bogus + rescheduled).sample(100), other_timestamp)
+    rescheduled.each { |r_id| q_contents[r_id][:ts] = other_timestamp }
+    expect(@bq.queue_peek(queue, 150)).to eq(q_contents)
   end
 end

@@ -291,6 +291,22 @@ EOF
       [@que_prefix + queue], [incr, timestamp])
   end
 
+  RESCHEDULE = <<EOF
+local j = 2
+while ARGV[j] do
+  if redis.call('zscore', KEYS[1], ARGV[j]) then
+    redis.call('zadd', KEYS[1], ARGV[1], ARGV[j])
+  end
+  j = j + 1
+end
+EOF
+  RESCHEDULE_SHA = Digest::SHA1.hexdigest(RESCHEDULE)
+
+  def reschedule(queue, ids, timestamp = Time.now.to_f)
+    redis_eval(RESCHEDULE_SHA, RESCHEDULE,
+      [@que_prefix + queue], [timestamp] + ids)
+  end
+
   def get_failures(failz)
     result = Hash.new { Array.new }
     fkeys = failz.keys
